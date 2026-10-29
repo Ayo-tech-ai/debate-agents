@@ -8,7 +8,8 @@ import litellm
 ROUNDS = int(os.getenv("DEBATE_ROUNDS", "5") or "5")
 MODEL_FOR = "groq/openai/gpt-oss-120b"
 MODEL_AGAINST = "groq/qwen/qwen3.8-27b"  # if this errors, change this line
-PAUSE_SECONDS = 60
+PAUSE_SECONDS = 60       # longest wait at each pause if you send nothing
+CHECK_SECONDS = 3        # how often the group is checked during a pause
 MAX_INTERJECTION = 500
 LOG_FILE = "debate_log.txt"
 
@@ -32,9 +33,17 @@ AGAINST_SYSTEM = (
 )
 
 
+def normalise(text):
+    """Lowercase and strip, and drop '@botname' from commands like /stop@mybot."""
+    text = text.strip().lower()
+    if text.startswith("/"):
+        text = text.split("@")[0]
+    return text
+
+
 def send(text):
     """Post a line to the Telegram group and print it to the job log."""
-    print(text + "\n")
+    print(text + "\n", flush=True)
     try:
         response = requests.post(
             f"{API}/sendMessage",
@@ -42,9 +51,9 @@ def send(text):
             timeout=10,
         )
         if response.status_code != 200:
-            print(f"Telegram send error {response.status_code}: {response.text[:200]}")
+            print(f"Telegram send error {response.status_code}: {response.text[:200]}", flush=True)
     except requests.RequestException as error:
-        print(f"Telegram send failed (debate continues): {error}")
+        print(f"Telegram send failed (debate continues): {error}", flush=True)
     time.sleep(3)  # keeps the group under Telegram's per-minute limit
 
 
@@ -70,7 +79,7 @@ def owner_messages(state):
     try:
         updates = get_updates(state["offset"])
     except (requests.RequestException, RuntimeError) as error:
-        print(f"Could not read Telegram this check: {error}")
+        print(f"Could not read Telegram this check: {error}", flush=True)
         return []
     texts = []
     for update in updates:
@@ -87,14 +96,24 @@ def owner_messages(state):
 
 
 def wait_for_moves(state):
-    """Listens to the group for PAUSE_SECONDS and returns what you sent."""
-    print(f"(Listening for your move in the group for {PAUSE_SECONDS}s.)")
+    """
+    Waits up to PAUSE_SECONDS for your move. Returns (moves, action), where
+    action is 'stop', 'continue' or 'timeout'. /cont and /stop act immediately.
+    """
+    print(f"(Pause: send /cont to go on, /stop to end, or a message to interject. "
+          f"Continues automatically after {PAUSE_SECONDS}s.)", flush=True)
     moves = []
     deadline = time.time() + PAUSE_SECONDS
     while time.time() < deadline:
-        moves.extend(owner_messages(state))
-        time.sleep(3)
-    return moves
+        for text in owner_messages(state):
+            command = normalise(text)
+            if command in ("/stop", "stop"):
+                return moves, "stop"
+            if command in ("/cont", "cont", "/continue", "continue"):
+                return moves, "continue"
+            moves.append(text)
+        time.sleep(CHECK_SECONDS)
+    return moves, "timeout"
 
 
 def ask(model, system, transcript):
@@ -123,12 +142,12 @@ def main():
     state = {"offset": skip_old_messages()}
     transcript = [f"[Moderator] Topic: {TOPIC}"]
     send(f"[Moderator] Debate: {TOPIC}")
-    print(f"Rounds: {ROUNDS}. Steer from the Telegram group: "
-          "a message interjects, 'stop' ends, silence continues.\n")
+    print(f"Rounds: {ROUNDS}. Commands in the group: /cont, /stop, or a message to interject.\n",
+          flush=True)
 
     try:
         for round_no in range(1, ROUNDS + 1):
-            print(f"--- Round {round_no} of {ROUNDS} ---")
+            print(f"--- Round {round_no} of {ROUNDS} ---", flush=True)
 
             point = ask(MODEL_FOR, FOR_SYSTEM, transcript)
             transcript.append(f"[For] {point}")
@@ -141,23 +160,22 @@ def main():
             if round_no == ROUNDS:
                 break
 
-            moves = wait_for_moves(state)
-            if any(m.lower() in ("stop", "/stop") for m in moves):
+            moves, action = wait_for_moves(state)
+            if action == "stop":
+                send("[Moderator] Stopped by the moderator.")
                 break
             for move in moves:
-                if move.lower() == "continue":
-                    continue
                 move = move[:MAX_INTERJECTION]
                 transcript.append(f"[Moderator] {move}")
                 send(f"[Moderator] {move}")
 
     except Exception as error:
-        print(f"\nStopped because of an error: {error}")
+        print(f"\nStopped because of an error: {error}", flush=True)
 
     send("[Moderator] Debate ended.")
     with open(LOG_FILE, "a", encoding="utf-8") as log:
         log.write("\n".join(transcript) + "\n\n" + "=" * 40 + "\n\n")
-    print(f"Transcript saved to {LOG_FILE}")
+    print(f"Transcript saved to {LOG_FILE}", flush=True)
 
 
 if __name__ == "__main__":
