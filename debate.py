@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 import time
 
@@ -8,8 +9,8 @@ import litellm
 ROUNDS = int(os.getenv("DEBATE_ROUNDS", "5") or "5")
 MODEL_FOR = "groq/openai/gpt-oss-120b"
 MODEL_AGAINST = "groq/qwen/qwen3.8-27b"  # if this errors, change this line
-PAUSE_SECONDS = 60       # longest wait at each pause if you send nothing
-CHECK_SECONDS = 3        # how often the group is checked during a pause
+PAUSE_SECONDS = 60
+CHECK_SECONDS = 3
 MAX_INTERJECTION = 500
 LOG_FILE = "debate_log.txt"
 
@@ -19,18 +20,24 @@ OWNER_ID = os.getenv("TELEGRAM_OWNER_ID", "")
 TOPIC = os.getenv("DEBATE_TOPIC", "").strip()
 API = f"https://api.telegram.org/bot{TOKEN}"
 
-FOR_SYSTEM = (
-    "You are debating FOR the motion. Argue your side firmly and clearly. "
-    "Respond directly to the most recent point from the other side. "
-    "Refer to the other side as 'the opposing view', never as 'you'. "
-    "Keep each turn under 100 words. Do not repeat yourself."
-)
-AGAINST_SYSTEM = (
-    "You are debating AGAINST the motion. Argue your side firmly and clearly. "
-    "Respond directly to the most recent point from the other side. "
-    "Refer to the other side as 'the opposing view', never as 'you'. "
-    "Keep each turn under 100 words. Do not repeat yourself."
-)
+SIDES = {
+    "For": {
+        "model": MODEL_FOR,
+        "system": (
+            "You are debating FOR the motion. Argue your side firmly and clearly. "
+            "Refer to the other side as 'the opposing view', never as 'you'. "
+            "Keep each turn under 100 words. Do not repeat yourself."
+        ),
+    },
+    "Against": {
+        "model": MODEL_AGAINST,
+        "system": (
+            "You are debating AGAINST the motion. Argue your side firmly and clearly. "
+            "Refer to the other side as 'the opposing view', never as 'you'. "
+            "Keep each turn under 100 words. Do not repeat yourself."
+        ),
+    },
+}
 
 
 def normalise(text):
@@ -96,10 +103,7 @@ def owner_messages(state):
 
 
 def wait_for_moves(state):
-    """
-    Waits up to PAUSE_SECONDS for your move. Returns (moves, action), where
-    action is 'stop', 'continue' or 'timeout'. /cont and /stop act immediately.
-    """
+    """Returns (moves, action) where action is 'stop', 'continue' or 'timeout'."""
     print(f"(Pause: send /cont to go on, /stop to end, or a message to interject. "
           f"Continues automatically after {PAUSE_SECONDS}s.)", flush=True)
     moves = []
@@ -116,16 +120,36 @@ def wait_for_moves(state):
     return moves, "timeout"
 
 
-def ask(model, system, transcript):
+def pick_starter():
+    """Randomly chooses which side speaks first in a round."""
+    return random.choice(["For", "Against"])
+
+
+def ask(side, transcript):
+    """Asks the agent for one turn. The prompt depends on whether the other side has spoken yet."""
+    other = "Against" if side == "For" else "For"
+    other_has_spoken = any(line.startswith(f"[{other}]") for line in transcript)
+
+    if other_has_spoken:
+        instruction = (
+            f"Respond directly to the most recent point from the opposing view, "
+            f"then advance your own argument."
+        )
+    else:
+        instruction = (
+            "You are opening the debate. The opposing view has not spoken yet, "
+            "so do NOT refer to it. Make your opening point on the topic."
+        )
+
     prompt = (
         "The debate so far:\n"
         + "\n".join(transcript)
-        + "\n\nWrite your next point now."
+        + f"\n\n{instruction}\nWrite your point now."
     )
     response = litellm.completion(
-        model=model,
+        model=SIDES[side]["model"],
         messages=[
-            {"role": "system", "content": system},
+            {"role": "system", "content": SIDES[side]["system"]},
             {"role": "user", "content": prompt},
         ],
         max_tokens=400,
@@ -149,13 +173,14 @@ def main():
         for round_no in range(1, ROUNDS + 1):
             print(f"--- Round {round_no} of {ROUNDS} ---", flush=True)
 
-            point = ask(MODEL_FOR, FOR_SYSTEM, transcript)
-            transcript.append(f"[For] {point}")
-            send(f"[For] {point}")
+            first = pick_starter()
+            second = "Against" if first == "For" else "For"
+            send(f"[Moderator] Round {round_no}: {first} opens.")
 
-            reply = ask(MODEL_AGAINST, AGAINST_SYSTEM, transcript)
-            transcript.append(f"[Against] {reply}")
-            send(f"[Against] {reply}")
+            for side in (first, second):
+                point = ask(side, transcript)
+                transcript.append(f"[{side}] {point}")
+                send(f"[{side}] {point}")
 
             if round_no == ROUNDS:
                 break
