@@ -6,9 +6,10 @@ import time
 import requests
 import litellm
 
-ROUNDS = int(os.getenv("DEBATE_ROUNDS", "5") or "5")
+TURNS = int(os.getenv("DEBATE_ROUNDS", "5") or "5")  # total points; 5 means For/Against alternating 5 times
 MODEL_FOR = "groq/openai/gpt-oss-120b"
 MODEL_AGAINST = "groq/qwen/qwen3.8-27b"  # if this errors, change this line
+PAUSE_EVERY = 2          # pause after every 2 points (one full exchange)
 PAUSE_SECONDS = 60
 CHECK_SECONDS = 3
 MAX_INTERJECTION = 500
@@ -121,7 +122,7 @@ def wait_for_moves(state):
 
 
 def pick_starter():
-    """Randomly chooses which side speaks first in a round."""
+    """Chosen once per topic. The sides then strictly alternate."""
     return random.choice(["For", "Against"])
 
 
@@ -132,8 +133,8 @@ def ask(side, transcript):
 
     if other_has_spoken:
         instruction = (
-            f"Respond directly to the most recent point from the opposing view, "
-            f"then advance your own argument."
+            "Respond directly to the most recent point from the opposing view, "
+            "then advance your own argument."
         )
     else:
         instruction = (
@@ -165,25 +166,25 @@ def main():
 
     state = {"offset": skip_old_messages()}
     transcript = [f"[Moderator] Topic: {TOPIC}"]
+
+    starter = pick_starter()
+    order = [starter, "Against" if starter == "For" else "For"]
+
     send(f"[Moderator] Debate: {TOPIC}")
-    print(f"Rounds: {ROUNDS}. Commands in the group: /cont, /stop, or a message to interject.\n",
+    send(f"[Moderator] {starter} opens. The sides then alternate until the end.")
+    print(f"Points: {TURNS}. Commands in the group: /cont, /stop, or a message to interject.\n",
           flush=True)
 
     try:
-        for round_no in range(1, ROUNDS + 1):
-            print(f"--- Round {round_no} of {ROUNDS} ---", flush=True)
+        for turn in range(TURNS):
+            side = order[turn % 2]  # strict alternation from the chosen starter
+            point = ask(side, transcript)
+            transcript.append(f"[{side}] {point}")
+            send(f"[{side}] {point}")
 
-            first = pick_starter()
-            second = "Against" if first == "For" else "For"
-            send(f"[Moderator] Round {round_no}: {first} opens.")
-
-            for side in (first, second):
-                point = ask(side, transcript)
-                transcript.append(f"[{side}] {point}")
-                send(f"[{side}] {point}")
-
-            if round_no == ROUNDS:
-                break
+            is_last = turn == TURNS - 1
+            if is_last or (turn + 1) % PAUSE_EVERY != 0:
+                continue
 
             moves, action = wait_for_moves(state)
             if action == "stop":
