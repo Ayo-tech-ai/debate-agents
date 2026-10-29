@@ -1,0 +1,47 @@
+name: Debate
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Debate topic"
+        required: true
+        type: string
+      rounds:
+        description: "Number of rounds"
+        required: false
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  debate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Run debate
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+          DEBATE_TOPIC: ${{ inputs.topic }}
+          DEBATE_ROUNDS: ${{ inputs.rounds }}
+        run: python debate.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debate-log
+          path: debate_log.txt
